@@ -11,13 +11,14 @@
 
 namespace sketch {
 
-// HTTP + WebSocket 服务：托管网页静态资源，接收浏览器下发的笔画/视口/清空消息。
+// HTTP + WebSocket 服务：托管网页静态资源，接收浏览器下发的笔画/视口/清空/撤销消息。
 // v0.1 单向镜像：浏览器 → 板子（板子只接收，不回发）。
 class WsServer {
 public:
     using DrawHandler     = std::function<void(const Stroke&)>;
     using ClearHandler    = std::function<void()>;
     using ViewportHandler = std::function<void(const Viewport&)>;
+    using UndoHandler     = std::function<void(bool /*redo*/)>;
 
     WsServer()  = default;
     ~WsServer();
@@ -30,7 +31,8 @@ public:
                const std::string& web_root,
                DrawHandler on_draw,
                ClearHandler on_clear,
-               ViewportHandler on_viewport);
+               ViewportHandler on_viewport,
+               UndoHandler on_undo);
     void stop();
     bool running() const { return _running.load(); }
 

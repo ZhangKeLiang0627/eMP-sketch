@@ -93,7 +93,14 @@ int main()
     server.start(port, web_root,
                  [&board](const sketch::Stroke& s) { board.addStroke(s); },
                  [&board]() { board.clear(); },
-                 [&board](const sketch::Viewport& vp) { board.setViewport(vp); });
+                 [&board](const sketch::Viewport& vp) { board.setViewport(vp); },
+                 [&board](bool redo) {
+                     if (redo) {
+                         board.redo();
+                     } else {
+                         board.undo();
+                     }
+                 });
 
     // 状态栏（ASCII only：LVGL 默认字体无中文字形）
     const std::string status = "eMP-sketch  " + localIpv4() + ":" + std::to_string(port);

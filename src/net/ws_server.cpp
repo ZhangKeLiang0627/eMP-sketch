@@ -25,10 +25,26 @@ uint16_t parseColor(const std::string& hex)
     return rgb565(0x37, 0x35, 0x2F);
 }
 
+// "pen"/"marker"/"highlighter"/"eraser" → BrushKind；未知回退 Pen
+BrushKind parseBrush(const std::string& name)
+{
+    if (name == "marker") {
+        return BrushKind::Marker;
+    }
+    if (name == "highlighter") {
+        return BrushKind::Highlighter;
+    }
+    if (name == "eraser") {
+        return BrushKind::Eraser;
+    }
+    return BrushKind::Pen;
+}
+
 void handleMessage(const std::string& raw,
                    const WsServer::DrawHandler& on_draw,
                    const WsServer::ClearHandler& on_clear,
-                   const WsServer::ViewportHandler& on_viewport)
+                   const WsServer::ViewportHandler& on_viewport,
+                   const WsServer::UndoHandler& on_undo)
 {
     try {
         const auto j      = nlohmann::json::parse(raw);
@@ -36,6 +52,9 @@ void handleMessage(const std::string& raw,
 
         if (type == "draw") {
             Stroke s;
+            s.id    = j.value("id", static_cast<uint32_t>(0));
+            s.brush = parseBrush(j.value("brush", std::string("pen")));
+            s.alpha = static_cast<uint8_t>(j.value("alpha", 255));
             s.color = parseColor(j.value("color", "#37352F"));
             s.width = static_cast<uint8_t>(j.value("width", 3));
             if (j.contains("points") && j["points"].is_array()) {
@@ -69,6 +88,10 @@ void handleMessage(const std::string& raw,
             vp.offset_x = j.value("x", 0.0f);
             vp.offset_y = j.value("y", 0.0f);
             on_viewport(vp);
+        } else if (type == "undo") {
+            on_undo(false);
+        } else if (type == "redo") {
+            on_undo(true);
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[sketch] bad ws message: %s\n", e.what());
@@ -86,18 +109,19 @@ bool WsServer::start(int port,
                      const std::string& web_root,
                      DrawHandler on_draw,
                      ClearHandler on_clear,
-                     ViewportHandler on_viewport)
+                     ViewportHandler on_viewport,
+                     UndoHandler on_undo)
 {
     if (!_srv.set_mount_point("/", web_root)) {
         std::fprintf(stderr, "[sketch] warning: web root '%s' not servable (WS 仍可用)\n",
                      web_root.c_str());
     }
 
-    _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport](
+    _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport, on_undo](
                               const httplib::Request&, httplib::ws::WebSocket& ws) {
         std::string msg;
         while (ws.read(msg) == httplib::ws::Text) {
-            handleMessage(msg, on_draw, on_clear, on_viewport);
+            handleMessage(msg, on_draw, on_clear, on_viewport, on_undo);
         }
     });
 
