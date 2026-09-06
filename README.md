@@ -94,10 +94,13 @@ T113-S3（192.168.124.11）实测：WebSocket 推入两条笔画（靛蓝对角 
 一条消息 = 一段笔画 / 一个视口 / 一次清空：
 
 ```jsonc
-{ "type": "draw",  "color": "#37352F", "width": 3, "points": [[x,y],[x,y],...] }
+{ "type": "draw",  "color": "#37352F", "width": 3, "points": [x0,y0,x1,y1,...] }
 { "type": "viewport", "scale": 1.0, "x": 0.0, "y": 0.0 }
 { "type": "clear" }
 ```
+
+`points` 为扁平坐标数组（每两点构成一个坐标）；服务端同时容忍嵌套 `[[x,y],...]` 格式。
+每次抬手（pointerup）发送一段完整笔画，板端整段渲染。
 
 `points` 为**世界坐标**，板端按当前视口变换落点。颜色 `#RRGGBB` → RGB565。
 

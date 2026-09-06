@@ -39,10 +39,24 @@ void handleMessage(const std::string& raw,
             s.color = parseColor(j.value("color", "#37352F"));
             s.width = static_cast<uint8_t>(j.value("width", 3));
             if (j.contains("points") && j["points"].is_array()) {
-                for (const auto& p : j["points"]) {
-                    if (p.is_array() && p.size() >= 2) {
-                        s.pts.push_back(p[0].get<int32_t>());
-                        s.pts.push_back(p[1].get<int32_t>());
+                const auto& pts = j["points"];
+                // 兼容两种点格式：扁平 [x0,y0,x1,y1,...]（paint.js 实发，板端渲染同构）
+                // 与嵌套 [[x,y],[x,y],...]（README v0.1 早期文档格式）
+                if (!pts.empty() && pts.front().is_array()) {
+                    for (const auto& p : pts) {
+                        if (p.is_array() && p.size() >= 2) {
+                            s.pts.push_back(p[0].get<int32_t>());
+                            s.pts.push_back(p[1].get<int32_t>());
+                        }
+                    }
+                } else {
+                    for (const auto& p : pts) {
+                        if (p.is_number()) {
+                            s.pts.push_back(p.get<int32_t>());
+                        }
+                    }
+                    if (s.pts.size() % 2 != 0) {
+                        s.pts.pop_back();  // 奇数尾点不成对，丢弃
                     }
                 }
             }
