@@ -1,0 +1,22 @@
+# 构建产物
+build/
+dist/
+cmake-build-*/
+
+# Python 虚拟环境
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 第三方依赖（由 fetch_repos.py 拉取，不入库）
+dependencies/
+
+# 编译器/编辑器
+.DS_Store
+*.swp
+compile_commands.json
+.cache/
+
+# 资产转换中间产物
+src/assets/res_c/*.c

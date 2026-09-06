@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>eMP-sketch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <span class="brand">eMP-sketch</span>
+  <span class="hint">网页绘制 · 板屏同显</span>
+  <span id="status"><span class="dot"></span><span class="text">连接中…</span></span>
+</header>
+
+<div class="toolbar">
+  <button class="tool active" data-tool="draw">画笔</button>
+  <button class="tool" data-tool="pan">抓手</button>
+
+  <div class="colors">
+    <span class="swatch active" data-color="#37352F" style="background:#37352F"></span>
+    <span class="swatch" data-color="#787774" style="background:#787774"></span>
+    <span class="swatch" data-color="#8AA0B8" style="background:#8AA0B8"></span>
+    <span class="swatch" data-color="#93A99B" style="background:#93A99B"></span>
+    <span class="swatch" data-color="#C89A7B" style="background:#C89A7B"></span>
+    <span class="swatch" data-color="#C6A97A" style="background:#C6A97A"></span>
+  </div>
+
+  <label class="width-slider">
+    粗细
+    <input type="range" id="width" min="1" max="24" value="3">
+    <span id="width-val">3</span>
+  </label>
+
+  <button class="btn" id="clear">清空</button>
+</div>
+
+<main>
+  <canvas id="canvas"></canvas>
+</main>
+
+<script src="paint.js"></script>
+</body>
+</html>
