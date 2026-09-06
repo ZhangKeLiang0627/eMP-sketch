@@ -54,6 +54,62 @@
   let panning = false;
   let lastX = 0, lastY = 0;
 
+  // 实时增量上屏：画笔移动时按节流把"上一已发点 → 当前点"的小线段发给板端，
+  // 板端逐段渲染，实现"画到哪同步到哪"，无需等整笔结束（v0.1.1）。
+  let lastSent = null;      // 上次已发送到板端的（世界坐标）点
+  let sentAny = false;      // 本笔是否已发过至少一段
+  let lastSendAt = 0;       // 上次发送时刻（performance.now）
+  const SEND_INTERVAL_MS = 33; // ≈30 段/秒：视觉无感，同时压低板端重绘频率
+
+  function sendSegmentTo(wx, wy) {
+    if (!lastSent) return;
+    send({ type: 'draw', color: current.color, width: current.width,
+           points: [lastSent.x, lastSent.y, wx, wy] });
+    lastSent = { x: wx, y: wy };
+    sentAny = true;
+  }
+  function pointerDown(wx, wy) {
+    drawing = true;
+    current = { color, width, points: [wx, wy] };
+    lastSent = { x: wx, y: wy };
+    sentAny = false;
+    lastSendAt = 0;
+  }
+  function pointerMoveTo(wx, wy) {
+    current.points.push(wx, wy);
+    redraw();
+    if (lastSent && (wx !== lastSent.x || wy !== lastSent.y)) {
+      const now = performance.now();
+      if (!sentAny || now - lastSendAt >= SEND_INTERVAL_MS) {
+        sendSegmentTo(wx, wy);
+        lastSendAt = now;
+      }
+    }
+  }
+  function pointerUp() {
+    if (!drawing || !current) return;
+    drawing = false;
+    if (current.points.length >= 2) {
+      if (!sentAny) {
+        // 原地按下即抬起（单击）：发单点，板端落一个圆点
+        send({ type: 'draw', color: current.color, width: current.width, points: current.points });
+      } else if (lastSent) {
+        // 补发节流间隙内未上屏的最后一段，保证笔迹收尾无缺口
+        const n = current.points.length;
+        const lx = current.points[n - 2];
+        const ly = current.points[n - 1];
+        if (lx !== lastSent.x || ly !== lastSent.y) {
+          sendSegmentTo(lx, ly);
+        }
+      }
+      strokes.push(current);
+    }
+    current = null;
+    lastSent = null;
+    sentAny = false;
+    redraw();
+  }
+
   function pointerPos(e) {
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
@@ -67,9 +123,8 @@
       lastX = p.x; lastY = p.y;
       return;
     }
-    drawing = true;
     const w = toWorld(p.x, p.y);
-    current = { color, width, points: [Math.round(w.x), Math.round(w.y)] };
+    pointerDown(Math.round(w.x), Math.round(w.y));
   });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -84,22 +139,18 @@
     }
     if (drawing && current) {
       const w = toWorld(p.x, p.y);
-      current.points.push(Math.round(w.x), Math.round(w.y));
-      redraw();
+      pointerMoveTo(Math.round(w.x), Math.round(w.y));
     }
   });
 
-  function endPointer() {
+  function endPointer(e) {
     if (panning) { panning = false; return; }
-    if (drawing && current) {
-      drawing = false;
-      if (current.points.length >= 2) {
-        strokes.push(current);
-        send({ type: 'draw', color: current.color, width: current.width, points: current.points });
-      }
-      current = null;
-      redraw();
+    if (drawing && current && e) {
+      const p = pointerPos(e);
+      const w = toWorld(p.x, p.y);
+      pointerMoveTo(Math.round(w.x), Math.round(w.y)); // 收掉最后一帧（含本地预览）
     }
+    pointerUp();
   }
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
