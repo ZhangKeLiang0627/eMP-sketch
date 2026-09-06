@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/sketch_types.hpp"
+#include "core/whiteboard.hpp"
 
 #include <atomic>
 #include <functional>
@@ -23,6 +24,7 @@ public:
     using ImageAddHandler  = std::function<void(const ImageItem&)>;
     using ImageGeoHandler  = std::function<bool(uint32_t /*id*/, const ImageItem& /*geo*/)>;
     using ImageRemoveHandler = std::function<void(uint32_t /*id*/)>;
+    using SnapshotProvider = std::function<Whiteboard::BoardSnapshot()>;
 
     WsServer()  = default;
     ~WsServer();
@@ -40,7 +42,8 @@ public:
                ImageDataHandler on_img_data,
                ImageAddHandler on_img_add,
                ImageGeoHandler on_img_update,
-               ImageRemoveHandler on_img_remove);
+               ImageRemoveHandler on_img_remove,
+               SnapshotProvider on_snapshot);
     void stop();
     bool running() const { return _running.load(); }
 

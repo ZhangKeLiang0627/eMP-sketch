@@ -30,9 +30,67 @@
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.text');
-  ws.onopen = () => { statusEl.classList.add('online'); statusText.textContent = '已连接'; };
+  ws.onopen = () => {
+    statusEl.classList.add('online');
+    statusText.textContent = '已连接';
+    send({ type: 'sync' });          // 刷新/重连后拉取板端当前场景恢复画面
+  };
   ws.onclose = () => { statusEl.classList.remove('online'); statusText.textContent = '已断开'; };
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg && msg.type === 'snapshot') applySnapshot(msg);
+  };
   const send = (o) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); };
+
+  // 板端撤销/重做深度（刷新后本地无历史时，用板端深度决定 Ctrl+Z 是否可回退）
+  let serverUndo = 0, serverRedo = 0;
+
+  // 快照恢复：用板端场景全量重建（RGB565 位图 → 本地 RGBA canvas）
+  function rgb565ToCanvas(w, h, b64) {
+    const bin = atob(b64);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const cctx = cv.getContext('2d');
+    const img = cctx.createImageData(w, h);
+    for (let i = 0; i < w * h; ++i) {
+      const lo = bin.charCodeAt(i * 2), hi = bin.charCodeAt(i * 2 + 1);
+      const c16 = lo | (hi << 8);
+      img.data[i * 4] = ((c16 >> 11) & 0x1F) << 3;
+      img.data[i * 4 + 1] = ((c16 >> 5) & 0x3F) << 2;
+      img.data[i * 4 + 2] = (c16 & 0x1F) << 3;
+      img.data[i * 4 + 3] = 255;
+    }
+    cctx.putImageData(img, 0, 0);
+    return cv;
+  }
+  function applySnapshot(msg) {
+    scene.length = 0;
+    bitmaps.clear();
+    history.length = 0;
+    redoOps.length = 0;
+    selectedImg = null;
+    viewport = { scale: 1, x: 0, y: 0 };
+    if (msg.vp) viewport = { scale: msg.vp.scale, x: msg.vp.x, y: msg.vp.y };
+    let maxId = 1000;
+    for (const b of msg.imgs || []) {
+      bitmaps.set(b.img, rgb565ToCanvas(b.w, b.h, b.data));
+    }
+    for (const it of msg.items || []) {
+      if (it.k === 0) {
+        scene.push({ kind: 'stroke', s: { id: it.id, brush: it.brush, alpha: it.alpha,
+                                          color: it.color, width: it.width, points: it.pts } });
+      } else {
+        scene.push({ kind: 'img', im: { id: it.id, img: it.img, cx: it.cx, cy: it.cy,
+                                        w: it.w, h: it.h, rot: it.rot } });
+      }
+      maxId = Math.max(maxId, it.id);
+    }
+    itemSeq = Math.max(itemSeq, maxId);
+    serverUndo = msg.undo ?? 0;
+    serverRedo = msg.redo ?? 0;
+    redraw();
+  }
 
   // ---- 笔刷参数 ----
   const ALPHA = { pen: 255, marker: 170, highlighter: 110, eraser: 255 };
@@ -80,31 +138,53 @@
     drawSelectionOverlay();
     ctx.restore();
   }
+  // ---- 图片选中框 + 手柄（角=等比缩放 / 边中=单轴拉伸 / 顶部圆=旋转）----
+  function imgHandles(im) {
+    const cos = Math.cos(im.rot), sin = Math.sin(im.rot);
+    const hw = im.w / 2, hh = im.h / 2;
+    const P = (lx, ly) => ({ x: im.cx + lx * cos - ly * sin, y: im.cy + lx * sin + ly * cos });
+    const corners = [P(-hw, -hh), P(hw, -hh), P(hw, hh), P(-hw, hh)];
+    const edges = [P(0, -hh), P(hw, 0), P(0, hh), P(-hw, 0)];   // 上 右 下 左
+    const off = 18 / viewport.scale;
+    const rot = P(0, -(hh + off));
+    return { corners, edges, rot };
+  }
   function drawSelectionOverlay() {
     if (!selectedImg) return;
     const im = selectedImg;
-    const cos = Math.cos(im.rot), sin = Math.sin(im.rot);
-    const hw = im.w / 2, hh = im.h / 2;
-    const corners = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([lx, ly]) => ({
-      x: im.cx + lx * cos - ly * sin,
-      y: im.cy + lx * sin + ly * cos,
-    }));
+    const Hd = imgHandles(im);
     ctx.save();
     ctx.strokeStyle = '#5B6AF0';
     ctx.lineWidth = 1.2 / viewport.scale;
     ctx.setLineDash([4 / viewport.scale, 3 / viewport.scale]);
     ctx.beginPath();
-    corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    Hd.corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     ctx.closePath();
     ctx.stroke();
-    corners.forEach((p) => {
-      ctx.setLineDash([]);
+    ctx.setLineDash([]);
+    // 旋转手柄杆 + 圆
+    ctx.beginPath();
+    ctx.moveTo(Hd.edges[0].x, Hd.edges[0].y);
+    ctx.lineTo(Hd.rot.x, Hd.rot.y);
+    ctx.stroke();
+    ctx.fillStyle = '#5B6AF0';
+    ctx.beginPath();
+    ctx.arc(Hd.rot.x, Hd.rot.y, 4.5 / viewport.scale, 0, Math.PI * 2);
+    ctx.fill();
+    // 8 个缩放手柄：角 = 方块，边中 = 圆
+    const hs = 3.5 / viewport.scale;
+    Hd.corners.forEach((p) => {
       ctx.fillStyle = '#FFFFFF';
       ctx.strokeStyle = '#5B6AF0';
       ctx.lineWidth = 1.2 / viewport.scale;
-      const r = 3.5 / viewport.scale;
+      ctx.fillRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
+      ctx.strokeRect(p.x - hs, p.y - hs, hs * 2, hs * 2);
+    });
+    Hd.edges.forEach((p) => {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.strokeStyle = '#5B6AF0';
       ctx.beginPath();
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, hs * 0.9, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     });
@@ -154,8 +234,14 @@
       }
     }
   }
+  function requestSync() { if (ws.readyState === WebSocket.OPEN) send({ type: 'sync' }); }
   function undo() {
-    if (drawing || dragImgMode || !history.length) return;
+    if (drawing || dragImgMode || adj) return;
+    if (!history.length) {
+      // 刷新后本地无历史：退回板端历史（发 undo 后拉快照重建）
+      if (serverUndo > 0) { serverUndo = 0; send({ type: 'undo' }); requestSync(); }
+      return;
+    }
     const op = history.pop();
     if (op.kind === 'add-stroke' || op.kind === 'add-img') {
       removeSceneById(op.id);
@@ -170,7 +256,11 @@
     redraw();
   }
   function redo() {
-    if (drawing || dragImgMode || !redoOps.length) return;
+    if (drawing || dragImgMode || adj) return;
+    if (!redoOps.length) {
+      if (serverRedo > 0) { serverRedo = 0; send({ type: 'redo' }); requestSync(); }
+      return;
+    }
     const op = redoOps.pop();
     if (op.kind === 'add-stroke') scene.push({ kind: 'stroke', s: op.s });
     else if (op.kind === 'add-img') scene.push({ kind: 'img', im: op.im });
@@ -243,11 +333,12 @@
     redraw();
   }
 
-  // ---- 图片：命中/选中/拖拽/删除/变换 ----
+  // ---- 图片：命中/选中/拖拽/手柄调整 ----
   let selectedImg = null;
-  let dragImgMode = false;
+  let dragImgMode = false;     // 拖动整图
   let dragGrab = null;         // 拾取点相对图片中心的偏移（世界坐标）
   let imgDragMoved = false;
+  let adj = null;              // 手柄调整：{kind:'scale'|'stretch'|'rotate', start...}
 
   function pickImage(wx, wy) {
     for (let i = scene.length - 1; i >= 0; --i) {
@@ -262,6 +353,60 @@
       }
     }
     return null;
+  }
+  // 命中选中图片的手柄：返回 null（未命中）或 {kind, i}
+  function hitHandle(wx, wy) {
+    if (!selectedImg) return null;
+    const tol = 14 / viewport.scale;
+    const Hd = imgHandles(selectedImg);
+    const R = (p) => Math.hypot(p.x - wx, p.y - wy) <= tol;
+    if (R(Hd.rot)) return { kind: 'rotate' };
+    for (let i = 0; i < 4; ++i) if (R(Hd.corners[i])) return { kind: 'scale', i };
+    for (let i = 0; i < 4; ++i) if (R(Hd.edges[i])) return { kind: 'stretch', i };
+    return null;
+  }
+  function beginAdjust(kind, i, wx, wy) {
+    const im = selectedImg;
+    adj = {
+      kind, i,
+      start: { cx: im.cx, cy: im.cy, w: im.w, h: im.h, rot: im.rot },
+      center: { x: im.cx, y: im.cy },
+      press: { x: wx, y: wy },
+      startDist: Math.max(1, Math.hypot(wx - im.cx, wy - im.cy)),
+      startAngle: Math.atan2(wy - im.cy, wx - im.cx),
+    };
+  }
+  function applyAdjust(wx, wy) {
+    const im = selectedImg;
+    if (!im || !adj) return;
+    const st = adj.start;
+    if (adj.kind === 'scale') {
+      const d = Math.hypot(wx - st.cx, wy - st.cy);
+      const f = clamp(d / st.startDist, 0.05, 40);
+      im.w = Math.max(8, st.w * f);
+      im.h = Math.max(8, st.h * f);
+      im.cx = st.cx; im.cy = st.cy;
+    } else if (adj.kind === 'stretch') {
+      // 局部轴投影：上/下边改 h，左/右边改 w（中心锚定）
+      const dx = wx - st.cx, dy = wy - st.cy;
+      const cos = Math.cos(-st.rot), sin = Math.sin(-st.rot);
+      const lx = dx * cos - dy * sin, ly = dx * sin + dy * cos;
+      if (adj.i === 0 || adj.i === 2) {           // 上 / 下 → 高
+        const nh = Math.max(8, Math.abs(ly) * 2);
+        im.h = (Math.abs(ly) < 1e-6) ? st.h : nh;
+        im.w = st.w;
+      } else {                                    // 左 / 右 → 宽
+        const nw = Math.max(8, Math.abs(lx) * 2);
+        im.w = (Math.abs(lx) < 1e-6) ? st.w : nw;
+        im.h = st.h;
+      }
+      im.cx = st.cx; im.cy = st.cy;
+    } else {   // rotate：绕中心任意角
+      const a = Math.atan2(wy - st.cy, wx - st.cx);
+      im.rot = st.rot + (a - st.startAngle);
+    }
+    geoDirty = true;
+    redraw();
   }
 
   // 粘贴图片：等比缩到 IMG_MAX_DIM，透明合成到纸面 → RGB565 LE → 上传 + 本地对象
@@ -335,6 +480,26 @@
     }
   });
 
+  // 工具栏"图片"：本地文件导入（与粘贴同一管线）
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.style.display = 'none';
+  document.body.appendChild(fileInput);
+  const importBtn = document.getElementById('import-img');
+  if (importBtn) {
+    importBtn.addEventListener('click', () => fileInput.click());
+  }
+  fileInput.addEventListener('change', () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const imgEl = new Image();
+    imgEl.onload = () => { importImage(imgEl); URL.revokeObjectURL(url); };
+    imgEl.src = url;
+    fileInput.value = '';
+  });
+
   function deleteSelectedImg() {
     if (!selectedImg) return;
     const im = selectedImg;
@@ -374,6 +539,11 @@
       return;
     }
     const w = toWorld(p.x, p.y);
+    const hh = hitHandle(w.x, w.y);
+    if (hh) {
+      beginAdjust(hh.kind, hh.i, w.x, w.y);
+      return;
+    }
     const hit = pickImage(w.x, w.y);
     if (hit) {
       selectedImg = hit;
@@ -398,6 +568,10 @@
       redraw();
       return;
     }
+    if (adj && selectedImg) {
+      applyAdjust(w.x, w.y);
+      return;
+    }
     if (dragImgMode && selectedImg) {
       selectedImg.cx = w.x - dragGrab.x;
       selectedImg.cy = w.y - dragGrab.y;
@@ -413,10 +587,15 @@
 
   function endPointer(e) {
     if (panning) { panning = false; return; }
+    if (adj) {
+      adj = null;
+      flushPending();   // 立即发出最终几何
+      return;
+    }
     if (dragImgMode) {
       dragImgMode = false;
       dragGrab = null;
-      flushPending();   // 立即发出最终几何，减少拖尾延迟
+      flushPending();
       return;
     }
     if (drawing && current && e) {

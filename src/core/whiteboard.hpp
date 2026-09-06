@@ -36,6 +36,16 @@ public:
     const uint16_t* framebuffer() const { return _fb.data(); }
     const Viewport& viewport() const { return _vp; }
 
+    // ---- 快照（新连接/刷新恢复用，线程安全）----
+    struct BoardSnapshot {
+        Viewport vp;
+        std::vector<SceneItem> items;                    // 按绘制顺序
+        std::map<uint32_t, ImageBitmap> bitmaps;         // 场景图片引用的位图
+        size_t undo_depth = 0;                           // 撤销历史深度（供浏览器刷新后回退）
+        size_t redo_depth = 0;
+    };
+    BoardSnapshot snapshot() const;
+
     static constexpr int32_t width()  { return kScreenWidth; }
     static constexpr int32_t height() { return kScreenHeight; }
 

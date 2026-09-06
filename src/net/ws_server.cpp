@@ -76,6 +76,110 @@ bool parseBitmap(const std::string& data_b64, uint32_t w, uint32_t h, ImageBitma
     return true;
 }
 
+// base64 编码（用于快照回发位图）
+std::string encodeBase64(const uint8_t* data, size_t len)
+{
+    static const char* kTab = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= len) {
+        const uint32_t v = (static_cast<uint32_t>(data[i]) << 16) |
+                           (static_cast<uint32_t>(data[i + 1]) << 8) | data[i + 2];
+        out.push_back(kTab[(v >> 18) & 63]);
+        out.push_back(kTab[(v >> 12) & 63]);
+        out.push_back(kTab[(v >> 6) & 63]);
+        out.push_back(kTab[v & 63]);
+        i += 3;
+    }
+    const size_t rest = len - i;
+    if (rest == 1) {
+        const uint32_t v = static_cast<uint32_t>(data[i]) << 16;
+        out.push_back(kTab[(v >> 18) & 63]);
+        out.push_back(kTab[(v >> 12) & 63]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (rest == 2) {
+        const uint32_t v = (static_cast<uint32_t>(data[i]) << 16) |
+                           (static_cast<uint32_t>(data[i + 1]) << 8);
+        out.push_back(kTab[(v >> 18) & 63]);
+        out.push_back(kTab[(v >> 12) & 63]);
+        out.push_back(kTab[(v >> 6) & 63]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+// RGB565 → "#RRGGBB"
+std::string colorHex(uint16_t c)
+{
+    const int r = ((c >> 11) & 0x1F);
+    const int g = ((c >> 5) & 0x3F);
+    const int b = (c & 0x1F);
+    const int r8 = (r << 3) | (r >> 2);
+    const int g8 = (g << 2) | (g >> 4);
+    const int b8 = (b << 3) | (b >> 2);
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", r8, g8, b8);
+    return buf;
+}
+
+const char* brushName(BrushKind k)
+{
+    switch (k) {
+        case BrushKind::Marker:      return "marker";
+        case BrushKind::Highlighter: return "highlighter";
+        case BrushKind::Eraser:      return "eraser";
+        default:                     return "pen";
+    }
+}
+
+// 白板快照 → 浏览器恢复用的 snapshot 消息
+std::string buildSnapshotReply(const Whiteboard::BoardSnapshot& snap)
+{
+    nlohmann::json out;
+    out["type"] = "snapshot";
+    out["vp"]   = {{"scale", snap.vp.scale}, {"x", snap.vp.offset_x}, {"y", snap.vp.offset_y}};
+    nlohmann::json items = nlohmann::json::array();
+    for (const SceneItem& it : snap.items) {
+        if (it.kind == SceneItem::Kind::Stroke) {
+            const Stroke& s = it.stroke;
+            items.push_back({{"k", 0},
+                             {"id", it.id},
+                             {"color", colorHex(s.color)},
+                             {"brush", brushName(s.brush)},
+                             {"alpha", s.alpha},
+                             {"width", s.width},
+                             {"pts", s.pts}});
+        } else {
+            const ImageItem& im = it.image;
+            items.push_back({{"k", 1},
+                             {"id", it.id},
+                             {"img", im.img},
+                             {"cx", im.cx},
+                             {"cy", im.cy},
+                             {"w", im.w},
+                             {"h", im.h},
+                             {"rot", im.rot}});
+        }
+    }
+    nlohmann::json imgs = nlohmann::json::array();
+    for (const auto& kv : snap.bitmaps) {
+        const ImageBitmap& bmp = kv.second;
+        imgs.push_back({{"img", kv.first},
+                        {"w", bmp.w},
+                        {"h", bmp.h},
+                        {"data", encodeBase64(
+                             reinterpret_cast<const uint8_t*>(bmp.px.data()),
+                             bmp.px.size() * sizeof(uint16_t))}});
+    }
+    out["items"] = items;
+    out["imgs"]  = imgs;
+    out["undo"]  = snap.undo_depth;
+    out["redo"]  = snap.redo_depth;
+    return out.dump();
+}
+
 // "#RRGGBB" → RGB565；解析失败回退墨色 #37352F
 uint16_t parseColor(const std::string& hex)
 {
@@ -219,7 +323,8 @@ bool WsServer::start(int port,
                      ImageDataHandler on_img_data,
                      ImageAddHandler on_img_add,
                      ImageGeoHandler on_img_update,
-                     ImageRemoveHandler on_img_remove)
+                     ImageRemoveHandler on_img_remove,
+                     SnapshotProvider on_snapshot)
 {
     if (!_srv.set_mount_point("/", web_root)) {
         std::fprintf(stderr, "[sketch] warning: web root '%s' not servable (WS 仍可用)\n",
@@ -227,10 +332,22 @@ bool WsServer::start(int port,
     }
 
     _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport, on_undo, on_img_data, on_img_add,
-                           on_img_update, on_img_remove](
+                           on_img_update, on_img_remove, on_snapshot](
                               const httplib::Request&, httplib::ws::WebSocket& ws) {
         std::string msg;
         while (ws.read(msg) == httplib::ws::Text) {
+            // 快照请求：回复当前场景（页面刷新后的恢复）
+            if (on_snapshot) {
+                try {
+                    const auto j = nlohmann::json::parse(msg);
+                    if (j.value("type", std::string()) == "sync") {
+                        ws.send(buildSnapshotReply(on_snapshot()));
+                        continue;
+                    }
+                } catch (...) {
+                    // 非 JSON / 解析失败 → 走常规消息处理（会再报一次错，无妨）
+                }
+            }
             handleMessage(msg, on_draw, on_clear, on_viewport, on_undo, on_img_data,
                           on_img_add, on_img_update, on_img_remove);
         }

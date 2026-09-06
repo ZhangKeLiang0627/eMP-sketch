@@ -247,6 +247,26 @@ bool Whiteboard::renderIfDirty()
     return true;
 }
 
+Whiteboard::BoardSnapshot Whiteboard::snapshot() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    BoardSnapshot snap;
+    snap.vp        = _vp;
+    snap.items     = _items;
+    snap.undo_depth = _undo_stack.size();
+    snap.redo_depth = _redo_stack.size();
+    // 只带场景引用的位图（避免无主缓存膨胀）
+    for (const SceneItem& it : _items) {
+        if (it.kind == SceneItem::Kind::Image) {
+            auto f = _bitmaps.find(it.image.img);
+            if (f != _bitmaps.end()) {
+                snap.bitmaps[f->first] = f->second;
+            }
+        }
+    }
+    return snap;
+}
+
 void Whiteboard::pushHistory(const HistoryEntry& e)
 {
     _undo_stack.push_back(e);

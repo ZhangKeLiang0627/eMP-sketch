@@ -108,7 +108,8 @@ int main()
                  [&board](uint32_t id, const sketch::ImageItem& geo) {
                      return board.updateImage(id, geo);
                  },
-                 [&board](uint32_t id) { board.removeImage(id); });
+                 [&board](uint32_t id) { board.removeImage(id); },
+                 [&board]() { return board.snapshot(); });
 
     // 状态栏（ASCII only：LVGL 默认字体无中文字形）
     const std::string status = "eMP-sketch  " + localIpv4() + ":" + std::to_string(port);
