@@ -3,9 +3,78 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace sketch {
 namespace {
+
+// base64 → 原始字节（标准表，忽略空白）；失败返回 false
+bool decodeBase64(const std::string& in, std::vector<uint8_t>& out)
+{
+    static const signed char kDec[256] = {
+        /* 由 init 填充，见下 */
+    };
+    // 运行时建表（避免大静态初始化表）
+    static signed char tbl[256];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < 256; ++i) {
+            tbl[i] = -1;
+        }
+        const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; alphabet[i]; ++i) {
+            tbl[static_cast<uint8_t>(alphabet[i])] = static_cast<signed char>(i);
+        }
+        init = true;
+    }
+    (void)kDec;
+
+    out.clear();
+    out.reserve((in.size() / 4) * 3);
+    int val = 0;
+    int bits = 0;
+    for (char ch : in) {
+        if (ch == '=' || ch == '\n' || ch == '\r') {
+            continue;
+        }
+        const signed char d = tbl[static_cast<uint8_t>(ch)];
+        if (d < 0) {
+            return false;
+        }
+        val = (val << 6) | d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
+        }
+    }
+    return true;
+}
+
+// 把 base64 的 RGB565 字节流填入 ImageBitmap
+bool parseBitmap(const std::string& data_b64, uint32_t w, uint32_t h, ImageBitmap& bmp)
+{
+    std::vector<uint8_t> bytes;
+    if (!decodeBase64(data_b64, bytes)) {
+        return false;
+    }
+    if (bytes.size() != static_cast<size_t>(w) * h * 2) {
+        return false;
+    }
+    ImageBitmap out;
+    out.w = w;
+    out.h = h;
+    out.px.resize(static_cast<size_t>(w) * h);
+    // 字节序 LE：低字节在前（x86/ARM 均小端）
+    for (size_t i = 0; i < out.px.size(); ++i) {
+        out.px[i] = static_cast<uint16_t>(bytes[i * 2]) |
+                    (static_cast<uint16_t>(bytes[i * 2 + 1]) << 8);
+    }
+    bmp = std::move(out);
+    return true;
+}
 
 // "#RRGGBB" → RGB565；解析失败回退墨色 #37352F
 uint16_t parseColor(const std::string& hex)
@@ -44,7 +113,11 @@ void handleMessage(const std::string& raw,
                    const WsServer::DrawHandler& on_draw,
                    const WsServer::ClearHandler& on_clear,
                    const WsServer::ViewportHandler& on_viewport,
-                   const WsServer::UndoHandler& on_undo)
+                   const WsServer::UndoHandler& on_undo,
+                   const WsServer::ImageDataHandler& on_img_data,
+                   const WsServer::ImageAddHandler& on_img_add,
+                   const WsServer::ImageGeoHandler& on_img_update,
+                   const WsServer::ImageRemoveHandler& on_img_remove)
 {
     try {
         const auto j      = nlohmann::json::parse(raw);
@@ -92,6 +165,38 @@ void handleMessage(const std::string& raw,
             on_undo(false);
         } else if (type == "redo") {
             on_undo(true);
+        } else if (type == "img-data") {
+            const uint32_t img_id = j.value("img", static_cast<uint32_t>(0));
+            const uint32_t w = j.value("w", static_cast<uint32_t>(0));
+            const uint32_t h = j.value("h", static_cast<uint32_t>(0));
+            ImageBitmap bmp;
+            if (parseBitmap(j.value("data", std::string()), w, h, bmp)) {
+                on_img_data(img_id, bmp);
+            } else {
+                std::fprintf(stderr, "[sketch] bad img-data (w=%u h=%u)\n", w, h);
+            }
+        } else if (type == "img") {
+            ImageItem im;
+            im.id  = j.value("id", static_cast<uint32_t>(0));
+            im.img = j.value("img", static_cast<uint32_t>(0));
+            im.cx  = j.value("cx", 0.0f);
+            im.cy  = j.value("cy", 0.0f);
+            im.w   = j.value("w", 0.0f);
+            im.h   = j.value("h", 0.0f);
+            im.rot = j.value("rot", 0.0f);
+            on_img_add(im);
+        } else if (type == "img-update") {
+            ImageItem im;
+            im.id  = j.value("id", static_cast<uint32_t>(0));
+            im.img = j.value("img", static_cast<uint32_t>(0));
+            im.cx  = j.value("cx", 0.0f);
+            im.cy  = j.value("cy", 0.0f);
+            im.w   = j.value("w", 0.0f);
+            im.h   = j.value("h", 0.0f);
+            im.rot = j.value("rot", 0.0f);
+            on_img_update(im.id, im);
+        } else if (type == "img-remove") {
+            on_img_remove(j.value("id", static_cast<uint32_t>(0)));
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[sketch] bad ws message: %s\n", e.what());
@@ -110,18 +215,24 @@ bool WsServer::start(int port,
                      DrawHandler on_draw,
                      ClearHandler on_clear,
                      ViewportHandler on_viewport,
-                     UndoHandler on_undo)
+                     UndoHandler on_undo,
+                     ImageDataHandler on_img_data,
+                     ImageAddHandler on_img_add,
+                     ImageGeoHandler on_img_update,
+                     ImageRemoveHandler on_img_remove)
 {
     if (!_srv.set_mount_point("/", web_root)) {
         std::fprintf(stderr, "[sketch] warning: web root '%s' not servable (WS 仍可用)\n",
                      web_root.c_str());
     }
 
-    _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport, on_undo](
+    _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport, on_undo, on_img_data, on_img_add,
+                           on_img_update, on_img_remove](
                               const httplib::Request&, httplib::ws::WebSocket& ws) {
         std::string msg;
         while (ws.read(msg) == httplib::ws::Text) {
-            handleMessage(msg, on_draw, on_clear, on_viewport, on_undo);
+            handleMessage(msg, on_draw, on_clear, on_viewport, on_undo, on_img_data,
+                          on_img_add, on_img_update, on_img_remove);
         }
     });
 

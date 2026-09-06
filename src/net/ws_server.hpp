@@ -15,10 +15,14 @@ namespace sketch {
 // v0.1 单向镜像：浏览器 → 板子（板子只接收，不回发）。
 class WsServer {
 public:
-    using DrawHandler     = std::function<void(const Stroke&)>;
-    using ClearHandler    = std::function<void()>;
-    using ViewportHandler = std::function<void(const Viewport&)>;
-    using UndoHandler     = std::function<void(bool /*redo*/)>;
+    using DrawHandler      = std::function<void(const Stroke&)>;
+    using ClearHandler     = std::function<void()>;
+    using ViewportHandler  = std::function<void(const Viewport&)>;
+    using UndoHandler      = std::function<void(bool /*redo*/)>;
+    using ImageDataHandler = std::function<void(uint32_t /*img_id*/, const ImageBitmap&)>;
+    using ImageAddHandler  = std::function<void(const ImageItem&)>;
+    using ImageGeoHandler  = std::function<bool(uint32_t /*id*/, const ImageItem& /*geo*/)>;
+    using ImageRemoveHandler = std::function<void(uint32_t /*id*/)>;
 
     WsServer()  = default;
     ~WsServer();
@@ -32,7 +36,11 @@ public:
                DrawHandler on_draw,
                ClearHandler on_clear,
                ViewportHandler on_viewport,
-               UndoHandler on_undo);
+               UndoHandler on_undo,
+               ImageDataHandler on_img_data,
+               ImageAddHandler on_img_add,
+               ImageGeoHandler on_img_update,
+               ImageRemoveHandler on_img_remove);
     void stop();
     bool running() const { return _running.load(); }
 

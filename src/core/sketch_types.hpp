@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -41,6 +42,34 @@ struct Stroke {
     std::vector<int32_t> pts;        // 世界坐标，偶数索引为 x，奇数索引为 y
 
     bool hasPoints() const { return pts.size() >= 2; }
+};
+
+// 图片位图（RGB565 原始像素，v0.2 图片对象的数据源，由 img-data 消息上传缓存）
+struct ImageBitmap {
+    uint32_t w = 0;
+    uint32_t h = 0;
+    std::vector<uint16_t> px;        // 行主序 w*h
+    bool valid() const { return w > 0 && h > 0 && px.size() == static_cast<size_t>(w) * h; }
+};
+
+// 场景图片对象（v0.2）：世界坐标下的矩形贴图，中心 (cx,cy)、显示宽高 (w,h)、旋转 rot
+struct ImageItem {
+    uint32_t id = 0;                 // 场景对象 id
+    uint32_t img = 0;                // 引用 ImageBitmap 缓存键
+    float    cx = 0.0f;              // 中心 x（世界坐标）
+    float    cy = 0.0f;
+    float    w  = 0.0f;              // 显示宽（世界坐标，>0）
+    float    h  = 0.0f;
+    float    rot = 0.0f;             // 弧度（顺时针，y 向下）
+    bool valid() const { return w > 0.0f && h > 0.0f; }
+};
+
+// 统一场景条目：场景图按此列表顺序重绘（笔画与图片可任意交错）
+struct SceneItem {
+    enum class Kind : uint8_t { Stroke = 0, Image = 1 } kind = Kind::Stroke;
+    uint32_t id   = 0;               // 对象 id（Stroke 与其 id 一致）
+    Stroke   stroke;                 // kind == Stroke
+    ImageItem image;                 // kind == Image
 };
 
 // 视口：世界坐标 → 屏幕坐标的变换。screen = (world - offset) * scale

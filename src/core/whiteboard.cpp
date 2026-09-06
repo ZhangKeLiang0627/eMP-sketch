@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace sketch {
 namespace {
@@ -20,6 +21,16 @@ Whiteboard::Whiteboard()
     _fb.resize(static_cast<size_t>(kScreenWidth) * kScreenHeight, kPaperColor);
 }
 
+void Whiteboard::cacheBitmap(uint32_t img_id, const ImageBitmap& bmp)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!bmp.valid()) {
+        return;
+    }
+    _bitmaps[img_id] = bmp;
+    setDirty();  // 引用该图的图片对象可能已存在，重绘一次
+}
+
 void Whiteboard::addStroke(const Stroke& stroke)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -28,24 +39,71 @@ void Whiteboard::addStroke(const Stroke& stroke)
     }
 
     // 同 id 增量段合并到末笔（浏览器把一笔拆成多段消息推送）
-    if (stroke.id != 0 && !_strokes.empty()) {
-        Stroke& last = _strokes.back();
-        if (last.id == stroke.id) {
+    if (stroke.id != 0 && !_items.empty()) {
+        SceneItem& last = _items.back();
+        if (last.kind == SceneItem::Kind::Stroke && last.stroke.id == stroke.id) {
             // 追加段共享首点（浏览器发 [上一已发点,当前点]），跳过重复点对
-            const size_t n = last.pts.size();
+            std::vector<int32_t>& pts = last.stroke.pts;
+            const size_t n = pts.size();
             if (n >= 2 && stroke.pts.size() >= 2 &&
-                last.pts[n - 2] == stroke.pts[0] && last.pts[n - 1] == stroke.pts[1]) {
-                last.pts.insert(last.pts.end(), stroke.pts.begin() + 2, stroke.pts.end());
+                pts[n - 2] == stroke.pts[0] && pts[n - 1] == stroke.pts[1]) {
+                pts.insert(pts.end(), stroke.pts.begin() + 2, stroke.pts.end());
             } else {
-                last.pts.insert(last.pts.end(), stroke.pts.begin(), stroke.pts.end());
+                pts.insert(pts.end(), stroke.pts.begin(), stroke.pts.end());
             }
             setDirty();
             return;
         }
     }
 
-    _strokes.push_back(stroke);
-    pushHistory(HistoryEntry{HistoryEntry::Op::AddStroke, stroke, {}});
+    SceneItem item;
+    item.kind   = SceneItem::Kind::Stroke;
+    item.id     = stroke.id != 0 ? stroke.id : static_cast<uint32_t>(_items.size() + 1);
+    item.stroke = stroke;
+    _items.push_back(item);
+    pushHistory(HistoryEntry{HistoryEntry::Op::AddStroke, stroke, {}, {}});
+    setDirty();
+}
+
+void Whiteboard::addImage(const ImageItem& image)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!image.valid()) {
+        return;
+    }
+    SceneItem item;
+    item.kind  = SceneItem::Kind::Image;
+    item.id    = image.id != 0 ? image.id : static_cast<uint32_t>(_items.size() + 1);
+    item.image = image;
+    _items.push_back(item);
+    pushHistory(HistoryEntry{HistoryEntry::Op::AddImage, {}, item.image, {}});
+    setDirty();
+}
+
+bool Whiteboard::updateImage(uint32_t id, const ImageItem& geo)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (id == 0 || !geo.valid()) {
+        return false;
+    }
+    SceneItem* item = findItemLocked(id);
+    if (item == nullptr || item->kind != SceneItem::Kind::Image) {
+        return false;
+    }
+    item->image = geo;
+    setDirty();
+    return true;
+}
+
+void Whiteboard::removeImage(uint32_t id)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    SceneItem* item = findItemLocked(id);
+    if (item == nullptr || item->kind != SceneItem::Kind::Image) {
+        return;
+    }
+    pushHistory(HistoryEntry{HistoryEntry::Op::RemoveImage, {}, item->image, {}});
+    removeItemLocked(id);
     setDirty();
 }
 
@@ -58,21 +116,50 @@ void Whiteboard::undo()
     HistoryEntry e = _undo_stack.back();
     _undo_stack.pop_back();
 
-    if (e.op == HistoryEntry::Op::AddStroke) {
-        // 反向：按 id 移除。若该笔后续被同 id 段合并变大，移除的是完整末笔。
-        Stroke* cur = findStrokeLocked(e.stroke.id);
-        if (cur != nullptr) {
-            HistoryEntry redo_entry;
-            redo_entry.op      = HistoryEntry::Op::AddStroke;
-            redo_entry.stroke  = *cur;   // 记录完整对象供 redo
-            _redo_stack.push_back(redo_entry);
-            removeStrokeLocked(e.stroke.id);
+    switch (e.op) {
+        case HistoryEntry::Op::AddStroke: {
+            // 移除完整末笔（含增量段合并后的全部点）
+            SceneItem* cur = findItemLocked(e.stroke.id);
+            if (cur != nullptr && cur->kind == SceneItem::Kind::Stroke) {
+                HistoryEntry redo_entry;
+                redo_entry.op     = HistoryEntry::Op::AddStroke;
+                redo_entry.stroke = cur->stroke;
+                _redo_stack.push_back(redo_entry);
+                removeItemLocked(e.stroke.id);
+            }
+            break;
         }
-    } else {  // ClearBoard：恢复清空前快照
-        _strokes = e.snapshot;
-        HistoryEntry redo_entry;
-        redo_entry.op = HistoryEntry::Op::ClearBoard;
-        _redo_stack.push_back(redo_entry);
+        case HistoryEntry::Op::AddImage: {
+            SceneItem* cur = findItemLocked(e.image.id);
+            if (cur != nullptr && cur->kind == SceneItem::Kind::Image) {
+                HistoryEntry redo_entry;
+                redo_entry.op    = HistoryEntry::Op::AddImage;
+                redo_entry.image = cur->image;
+                _redo_stack.push_back(redo_entry);
+                removeItemLocked(e.image.id);
+            }
+            break;
+        }
+        case HistoryEntry::Op::RemoveImage: {
+            // 恢复被删图片
+            SceneItem item;
+            item.kind  = SceneItem::Kind::Image;
+            item.id    = e.image.id;
+            item.image = e.image;
+            _items.push_back(item);
+            HistoryEntry redo_entry;
+            redo_entry.op    = HistoryEntry::Op::RemoveImage;
+            redo_entry.image = e.image;
+            _redo_stack.push_back(redo_entry);
+            break;
+        }
+        case HistoryEntry::Op::ClearBoard: {
+            _items = e.snapshot;
+            HistoryEntry redo_entry;
+            redo_entry.op = HistoryEntry::Op::ClearBoard;
+            _redo_stack.push_back(redo_entry);
+            break;
+        }
     }
     setDirty();
 }
@@ -86,13 +173,46 @@ void Whiteboard::redo()
     HistoryEntry e = _redo_stack.back();
     _redo_stack.pop_back();
 
-    if (e.op == HistoryEntry::Op::AddStroke) {
-        _strokes.push_back(e.stroke);
-        pushHistory(HistoryEntry{HistoryEntry::Op::AddStroke, e.stroke, {}});
-    } else {  // ClearBoard：重做清空
-        if (!_strokes.empty()) {
-            pushHistory(HistoryEntry{HistoryEntry::Op::ClearBoard, {}, _strokes});
-            _strokes.clear();
+    // 重做会把它重新变回"已执行操作"，压回 undo 栈；此时不能清空 redo 栈
+    // （还有后续条目要重做），因此不走 pushHistory()
+    auto pushUndoOnly = [this](const HistoryEntry& entry) { _undo_stack.push_back(entry); };
+
+    switch (e.op) {
+        case HistoryEntry::Op::AddStroke: {
+            SceneItem item;
+            item.kind   = SceneItem::Kind::Stroke;
+            item.id     = e.stroke.id != 0 ? e.stroke.id : static_cast<uint32_t>(_items.size() + 1);
+            item.stroke = e.stroke;
+            _items.push_back(item);
+            pushUndoOnly(HistoryEntry{HistoryEntry::Op::AddStroke, e.stroke, {}, {}});
+            break;
+        }
+        case HistoryEntry::Op::AddImage: {
+            SceneItem item;
+            item.kind  = SceneItem::Kind::Image;
+            item.id    = e.image.id;
+            item.image = e.image;
+            _items.push_back(item);
+            pushUndoOnly(HistoryEntry{HistoryEntry::Op::AddImage, {}, e.image, {}});
+            break;
+        }
+        case HistoryEntry::Op::RemoveImage: {
+            SceneItem* cur = findItemLocked(e.image.id);
+            if (cur != nullptr && cur->kind == SceneItem::Kind::Image) {
+                HistoryEntry undo_entry;
+                undo_entry.op    = HistoryEntry::Op::RemoveImage;
+                undo_entry.image = cur->image;
+                pushUndoOnly(undo_entry);
+                removeItemLocked(e.image.id);
+            }
+            break;
+        }
+        case HistoryEntry::Op::ClearBoard: {
+            if (!_items.empty()) {
+                pushUndoOnly(HistoryEntry{HistoryEntry::Op::ClearBoard, {}, {}, _items});
+                _items.clear();
+            }
+            break;
         }
     }
     setDirty();
@@ -101,11 +221,11 @@ void Whiteboard::redo()
 void Whiteboard::clear()
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (_strokes.empty()) {
+    if (_items.empty()) {
         return;
     }
-    pushHistory(HistoryEntry{HistoryEntry::Op::ClearBoard, {}, _strokes});
-    _strokes.clear();
+    pushHistory(HistoryEntry{HistoryEntry::Op::ClearBoard, {}, {}, _items});
+    _items.clear();
     setDirty();
 }
 
@@ -134,12 +254,12 @@ void Whiteboard::pushHistory(const HistoryEntry& e)
     _redo_stack.clear();
 }
 
-Stroke* Whiteboard::findStrokeLocked(uint32_t id)
+SceneItem* Whiteboard::findItemLocked(uint32_t id)
 {
     if (id == 0) {
         return nullptr;
     }
-    for (auto it = _strokes.rbegin(); it != _strokes.rend(); ++it) {
+    for (auto it = _items.rbegin(); it != _items.rend(); ++it) {
         if (it->id == id) {
             return &*it;
         }
@@ -147,11 +267,11 @@ Stroke* Whiteboard::findStrokeLocked(uint32_t id)
     return nullptr;
 }
 
-void Whiteboard::removeStrokeLocked(uint32_t id)
+void Whiteboard::removeItemLocked(uint32_t id)
 {
-    _strokes.erase(std::remove_if(_strokes.begin(), _strokes.end(),
-                                  [id](const Stroke& s) { return s.id == id; }),
-                   _strokes.end());
+    _items.erase(std::remove_if(_items.begin(), _items.end(),
+                                [id](const SceneItem& s) { return s.id == id; }),
+                 _items.end());
 }
 
 void Whiteboard::fill(uint16_t color)
@@ -188,8 +308,15 @@ void Whiteboard::blendPixel(int32_t x, int32_t y, uint16_t color, uint8_t alpha)
 void Whiteboard::renderLocked()
 {
     fill(kPaperColor);
-    for (const Stroke& s : _strokes) {
-        drawStrokeLocked(s);
+    for (const SceneItem& it : _items) {
+        if (it.kind == SceneItem::Kind::Stroke) {
+            drawStrokeLocked(it.stroke);
+        } else {
+            auto found = _bitmaps.find(it.image.img);
+            if (found != _bitmaps.end()) {
+                drawImageLocked(it.image, found->second);
+            }
+        }
     }
 }
 
@@ -197,12 +324,10 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
 {
     const float scale = _vp.scale > 0.0f ? _vp.scale : 1.0f;
 
-    // 橡皮 = 纸面色实心覆盖（按对象序合成，可稳定重绘）
     uint16_t paint_color = s.color;
     if (s.brush == BrushKind::Eraser) {
         paint_color = kPaperColor;
     }
-    // 最终宽度由客户端算好（荧光笔/橡皮加粗在客户端乘系数），板端按收到的 width 渲染
     const int32_t w = std::max(1, static_cast<int32_t>(std::lround(static_cast<float>(s.width) * scale)));
     const uint8_t alpha = (s.brush == BrushKind::Eraser) ? 255u : s.alpha;
     const int32_t radius = w / 2;
@@ -211,7 +336,6 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
         return;
     }
 
-    // 把世界坐标折线投影到屏幕坐标
     std::vector<int32_t> sx(npts), sy(npts);
     int32_t minx = kScreenWidth, miny = kScreenHeight, maxx = -1, maxy = -1;
     for (size_t i = 0; i < npts; ++i) {
@@ -222,7 +346,6 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
         minx = std::min(minx, sx[i]); maxx = std::max(maxx, sx[i]);
         miny = std::min(miny, sy[i]); maxy = std::max(maxy, sy[i]);
     }
-    // 外扩笔帽半径并裁剪到屏幕
     minx = std::max<int32_t>(0, minx - radius); miny = std::max<int32_t>(0, miny - radius);
     maxx = std::min<int32_t>(kScreenWidth - 1, maxx + radius);
     maxy = std::min<int32_t>(kScreenHeight - 1, maxy + radius);
@@ -233,7 +356,6 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
     const int32_t bh = maxy - miny + 1;
 
     if (alpha >= 255) {
-        // 不透明：直接印章式落笔（幂等，重叠无副作用）
         auto stamp_paint = [&](int32_t cx, int32_t cy) {
             for (int32_t dy = -radius; dy <= radius; ++dy) {
                 for (int32_t dx = -radius; dx <= radius; ++dx) {
@@ -276,8 +398,7 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
         return;
     }
 
-    // 半透明：先画"覆盖掩码"（每像素只标记一次），再统一对 dst 混合一次。
-    // 若按旧法逐印章直接混合，相邻印章重叠区会被合成 N 次 → 视觉接近不透明。
+    // 半透明：覆盖掩码（每像素一次）→ 统一对 dst 混合
     std::vector<uint8_t> cover(static_cast<size_t>(bw) * bh, 0);
     auto mark_cover = [&](int32_t cx, int32_t cy) {
         for (int32_t dy = -radius; dy <= radius; ++dy) {
@@ -292,7 +413,6 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
             }
         }
     };
-    // 沿线逐点推进（Bresenham），与不透明路径同一轨迹
     for (size_t i = 0; i + 1 < npts; ++i) {
         int32_t x0 = sx[i], y0 = sy[i];
         const int32_t x1 = sx[i + 1], y1 = sy[i + 1];
@@ -325,6 +445,61 @@ void Whiteboard::drawStrokeLocked(const Stroke& s)
             if (cover[static_cast<size_t>(by) * bw + bx]) {
                 blendPixel(minx + bx, miny + by, paint_color, alpha);
             }
+        }
+    }
+}
+
+// 旋转缩放 blit：目标屏幕像素 → 反变换到源图坐标 → 最近邻采样。
+// 图片局部坐标 u,v ∈ [-0.5, 0.5]（源中心为原点）。
+// world = center + R(u*w, v*h)；screen = (world - offset) * scale
+void Whiteboard::drawImageLocked(const ImageItem& img, const ImageBitmap& bmp)
+{
+    const float scale = _vp.scale > 0.0f ? _vp.scale : 1.0f;
+    const float cosr = std::cos(img.rot);
+    const float sinr = std::sin(img.rot);
+    const float ww = img.w * scale;   // 屏幕尺寸（世界宽 × 视口缩放）
+    const float hh = img.h * scale;
+    const float cxs = (img.cx - _vp.offset_x) * scale;   // 中心屏幕坐标
+    const float cys = (img.cy - _vp.offset_y) * scale;
+
+    // 屏幕外接矩形（旋转后）
+    const float ext_x = std::abs(ww * cosr) + std::abs(hh * sinr);
+    const float ext_y = std::abs(ww * sinr) + std::abs(hh * cosr);
+    int32_t x0 = static_cast<int32_t>(std::floor(cxs - ext_x / 2.0f));
+    int32_t y0 = static_cast<int32_t>(std::floor(cys - ext_y / 2.0f));
+    int32_t x1 = static_cast<int32_t>(std::ceil(cxs + ext_x / 2.0f));
+    int32_t y1 = static_cast<int32_t>(std::ceil(cys + ext_y / 2.0f));
+    x0 = std::max<int32_t>(x0, 0);
+    y0 = std::max<int32_t>(y0, 0);
+    x1 = std::min<int32_t>(x1, kScreenWidth - 1);
+    y1 = std::min<int32_t>(y1, kScreenHeight - 1);
+    if (x0 > x1 || y0 > y1) {
+        return;
+    }
+
+    // 逆变换矩阵：world = c + R·local  ⇒  local = Rᵀ·(world - c)
+    // 局部像素半宽 = 源 w/h 一半（源像素单位）→ 采样系数
+    const float inv_w2 = (bmp.w > 1) ? (bmp.w / ww) : 0.0f;   // 屏幕 dx → 源 u(像素)
+    const float inv_h2 = (bmp.h > 1) ? (bmp.h / hh) : 0.0f;
+
+    for (int32_t py = y0; py <= y1; ++py) {
+        const float wy = (py / scale) + _vp.offset_y;   // 屏幕 y → 世界 y
+        for (int32_t px = x0; px <= x1; ++px) {
+            const float wx = (px / scale) + _vp.offset_x;   // 屏幕 x → 世界 x
+            const float dxw = wx - img.cx;
+            const float dyw = wy - img.cy;
+            // 逆旋转：d = Rᵀ·Δ（旋转正向与浏览器 canvas rotate 一致：y 向下顺时针）
+            const float lx = dxw * cosr + dyw * sinr;
+            const float ly = -dxw * sinr + dyw * cosr;
+            // 世界长度 → 源像素坐标
+            const float su = lx * (bmp.w / img.w) + bmp.w / 2.0f;
+            const float sv = ly * (bmp.h / img.h) + bmp.h / 2.0f;
+            if (su < 0 || sv < 0 || su >= static_cast<float>(bmp.w) || sv >= static_cast<float>(bmp.h)) {
+                continue;
+            }
+            const int32_t u = static_cast<int32_t>(su);
+            const int32_t v = static_cast<int32_t>(sv);
+            setPixel(px, py, bmp.px[static_cast<size_t>(v) * bmp.w + u]);
         }
     }
 }

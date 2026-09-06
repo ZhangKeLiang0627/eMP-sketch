@@ -100,7 +100,15 @@ int main()
                      } else {
                          board.undo();
                      }
-                 });
+                 },
+                 [&board](uint32_t img_id, const sketch::ImageBitmap& bmp) {
+                     board.cacheBitmap(img_id, bmp);
+                 },
+                 [&board](const sketch::ImageItem& im) { board.addImage(im); },
+                 [&board](uint32_t id, const sketch::ImageItem& geo) {
+                     return board.updateImage(id, geo);
+                 },
+                 [&board](uint32_t id) { board.removeImage(id); });
 
     // 状态栏（ASCII only：LVGL 默认字体无中文字形）
     const std::string status = "eMP-sketch  " + localIpv4() + ":" + std::to_string(port);
