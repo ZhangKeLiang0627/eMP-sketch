@@ -115,7 +115,36 @@ int main()
     const std::string status = "eMP-sketch  " + localIpv4() + ":" + std::to_string(port);
 
     sketch::WhiteboardView view;
-    view.onEnter(lv_screen_active(), board, status);
+    sketch::UiHooks hooks;
+    // 板端触摸绘制段：本地已由 view 调 addStroke，此处仅广播给浏览器（世界坐标同构）
+    hooks.on_local_stroke = [&server](const sketch::Stroke& s) {
+        char color[8];
+        const int r = ((s.color >> 11) & 0x1F);
+        const int g = ((s.color >> 5) & 0x3F);
+        const int b = (s.color & 0x1F);
+        std::snprintf(color, sizeof(color), "#%02X%02X%02X",
+                      (r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2));
+        std::string msg = "{\"type\":\"draw\",\"id\":" + std::to_string(s.id) +
+                          ",\"brush\":\"pen\",\"alpha\":255,\"color\":\"" + color +
+                          "\",\"width\":" + std::to_string(s.width) + ",\"points\":[";
+        for (size_t i = 0; i < s.pts.size(); ++i) {
+            if (i) {
+                msg += ",";
+            }
+            msg += std::to_string(s.pts[i]);
+        }
+        msg += "]}";
+        server.broadcastText(msg);
+    };
+    // 顶栏清空：本地已由 board.clear 处理（见 on_clear hook 顺序）
+    hooks.on_clear = [&board, &server]() {
+        board.clear();
+        server.broadcastText("{\"type\":\"clear\"}");
+    };
+    hooks.on_mode_changed = [](bool draw) {
+        std::fprintf(stderr, "[sketch] draw mode %s\n", draw ? "ON (touch draws)" : "OFF (locked)");
+    };
+    view.onEnter(lv_screen_active(), board, status, hooks);
 
     lv_obj_invalidate(lv_screen_active());
     while (true) {

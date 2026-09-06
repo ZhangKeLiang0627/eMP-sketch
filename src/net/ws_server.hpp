@@ -5,8 +5,10 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <httplib.h>
 
@@ -47,10 +49,15 @@ public:
     void stop();
     bool running() const { return _running.load(); }
 
+    // 向所有已连接浏览器广播文本消息（板端主动产生：触摸画图段 / 清空）
+    void broadcastText(const std::string& text);
+
 private:
     httplib::Server _srv;
     std::thread _thread;
     std::atomic<bool> _running{false};
+    std::mutex _client_mutex;
+    std::vector<httplib::ws::WebSocket*> _clients;
 };
 
 }  // namespace sketch

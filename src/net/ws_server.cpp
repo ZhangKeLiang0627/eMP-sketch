@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -331,9 +332,13 @@ bool WsServer::start(int port,
                      web_root.c_str());
     }
 
-    _srv.WebSocket("/ws", [on_draw, on_clear, on_viewport, on_undo, on_img_data, on_img_add,
+    _srv.WebSocket("/ws", [this, on_draw, on_clear, on_viewport, on_undo, on_img_data, on_img_add,
                            on_img_update, on_img_remove, on_snapshot](
                               const httplib::Request&, httplib::ws::WebSocket& ws) {
+        {
+            std::lock_guard<std::mutex> lock(_client_mutex);
+            _clients.push_back(&ws);
+        }
         std::string msg;
         while (ws.read(msg) == httplib::ws::Text) {
             // 快照请求：回复当前场景（页面刷新后的恢复）
@@ -351,6 +356,10 @@ bool WsServer::start(int port,
             handleMessage(msg, on_draw, on_clear, on_viewport, on_undo, on_img_data,
                           on_img_add, on_img_update, on_img_remove);
         }
+        {
+            std::lock_guard<std::mutex> lock(_client_mutex);
+            _clients.erase(std::remove(_clients.begin(), _clients.end(), &ws), _clients.end());
+        }
     });
 
     _running.store(true);
@@ -359,6 +368,16 @@ bool WsServer::start(int port,
         _running.store(false);
     });
     return true;
+}
+
+void WsServer::broadcastText(const std::string& text)
+{
+    std::lock_guard<std::mutex> lock(_client_mutex);
+    for (httplib::ws::WebSocket* ws : _clients) {
+        if (ws != nullptr) {
+            ws->send(text);
+        }
+    }
 }
 
 void WsServer::stop()

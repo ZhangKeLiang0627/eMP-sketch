@@ -39,9 +39,41 @@
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg && msg.type === 'snapshot') applySnapshot(msg);
+    if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'snapshot') applySnapshot(msg);
+    else if (msg.type === 'draw') applyBoardStroke(msg);   // 板端触摸绘制的增量段
+    else if (msg.type === 'clear') {
+      scene.length = 0;
+      history.length = 0;
+      redoOps.length = 0;
+      selectedImg = null;
+      redraw();
+      requestSync();   // 以板端权威（含撤销深度）校准
+    }
   };
   const send = (o) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); };
+
+  // 板端广播的笔画段：同 id 段合并进本地末笔（与板端 addStroke 语义一致），不入本地撤销历史
+  function applyBoardStroke(msg) {
+    let tail = null;
+    for (let i = scene.length - 1; i >= 0; --i) {
+      const it = scene[i];
+      if (it.kind === 'stroke' && it.s.id === msg.id) { tail = it.s; break; }
+    }
+    if (!tail) {
+      scene.push({ kind: 'stroke', s: {
+        id: msg.id, brush: msg.brush || 'pen', alpha: msg.alpha ?? 255,
+        color: msg.color, width: msg.width, points: (msg.points || []).slice() } });
+    } else {
+      const p = tail.points, n = msg.points || [];
+      if (n.length >= 2 && p.length >= 2 && p[p.length - 2] === n[0] && p[p.length - 1] === n[1]) {
+        tail.points.push(...n.slice(2));
+      } else {
+        tail.points.push(...n);
+      }
+    }
+    redraw();
+  }
 
   // 板端撤销/重做深度（刷新后本地无历史时，用板端深度决定 Ctrl+Z 是否可回退）
   let serverUndo = 0, serverRedo = 0;
@@ -524,6 +556,63 @@
     redraw();
   }
 
+  // ---- 文字工具：点击画布 → 输入文本 → 栅格化为图片对象（天然支持中文） ----
+  function addTextAt(wx, wy) {
+    const txt = window.prompt('输入文字（确定上屏）', '');
+    if (txt == null) { selectedImg = null; redraw(); return; }
+    const t = txt.trim();
+    if (!t) { selectedImg = null; redraw(); return; }
+    const fs = 30;
+    const fam = '"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
+    const tmp = document.createElement('canvas');
+    const mctx = tmp.getContext('2d');
+    mctx.font = `${fs}px ${fam}`;
+    const tw = Math.ceil(mctx.measureText(t).width);
+    const th = Math.ceil(fs * 1.35);
+    tmp.width = Math.max(2, tw + 10);
+    tmp.height = Math.max(2, th);
+    const cctx = tmp.getContext('2d');
+    cctx.font = `${fs}px ${fam}`;
+    cctx.textBaseline = 'alphabetic';
+    cctx.fillStyle = color;
+    cctx.fillText(t, 5, fs + 3);
+
+    const cw = tmp.width, ch = tmp.height;
+    const data = cctx.getImageData(0, 0, cw, ch).data;
+    const bytes = new Uint8Array(cw * ch * 2);
+    const paper = [250, 250, 248];
+    for (let i = 0; i < cw * ch; ++i) {
+      const a = data[i * 4 + 3] / 255;
+      const r = Math.round(data[i * 4] * a + paper[0] * (1 - a));
+      const g = Math.round(data[i * 4 + 1] * a + paper[1] * (1 - a));
+      const b = Math.round(data[i * 4 + 2] * a + paper[2] * (1 - a));
+      const c16 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+      bytes[i * 2] = c16 & 0xFF;
+      bytes[i * 2 + 1] = c16 >> 8;
+    }
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    const imgId = nextImgId();
+    send({ type: 'img-data', img: imgId, w: cw, h: ch, data: btoa(bin) });
+
+    const src = document.createElement('canvas');
+    src.width = cw; src.height = ch;
+    src.getContext('2d').drawImage(tmp, 0, 0);
+    bitmaps.set(imgId, src);
+
+    const im = {
+      id: nextItemId(), img: imgId,
+      cx: wx + cw / 2, cy: wy + ch / 2, w: cw, h: ch, rot: 0,
+    };
+    scene.push({ kind: 'img', im });
+    pushOp({ kind: 'add-img', id: im.id, im });
+    selectedImg = im;
+    send({ type: 'img', id: im.id, img: im.img, cx: im.cx, cy: im.cy, w: im.w, h: im.h, rot: im.rot });
+    redraw();
+  }
+
   // ---- 指针事件 ----
   function pointerPos(e) {
     const r = canvas.getBoundingClientRect();
@@ -539,6 +628,10 @@
       return;
     }
     const w = toWorld(p.x, p.y);
+    if (tool === 'text') {
+      addTextAt(Math.round(w.x), Math.round(w.y));
+      return;
+    }
     const hh = hitHandle(w.x, w.y);
     if (hh) {
       beginAdjust(hh.kind, hh.i, w.x, w.y);
