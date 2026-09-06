@@ -83,6 +83,12 @@ SKETCH_WEB_ROOT=/root/web ./eMP-sketch
 
 板屏顶部会显示 `eMP-sketch  <ip>:8080`，手机/PC 连同一网段，浏览器打开该地址即可画。
 
+### 板端验证
+
+T113-S3（192.168.124.11）实测：WebSocket 推入两条笔画（靛蓝对角 + 红色波浪）即时同步到 fb0，顶部状态栏显示本机 IP 与端口。
+
+![board verify](docs/board-verify-v0.1.png)
+
 ## WebSocket 协议
 
 一条消息 = 一段笔画 / 一个视口 / 一次清空：
