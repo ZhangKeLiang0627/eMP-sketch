@@ -40,8 +40,10 @@ void handleMessage(const std::string& raw,
             s.width = static_cast<uint8_t>(j.value("width", 3));
             if (j.contains("points") && j["points"].is_array()) {
                 for (const auto& p : j["points"]) {
-                    s.pts.push_back(p.value(0, 0));
-                    s.pts.push_back(p.value(1, 0));
+                    if (p.is_array() && p.size() >= 2) {
+                        s.pts.push_back(p[0].get<int32_t>());
+                        s.pts.push_back(p[1].get<int32_t>());
+                    }
                 }
             }
             on_draw(s);
