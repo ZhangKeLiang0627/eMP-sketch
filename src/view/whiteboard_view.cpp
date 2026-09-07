@@ -81,9 +81,11 @@ void WhiteboardView::onEnter(lv_obj_t* parent, Whiteboard& board, const std::str
             self->_hooks.on_mode_changed(self->_draw_mode);
         }
     }, LV_EVENT_CLICKED, this);
-    lv_obj_add_event_cb(_close_btn, [](lv_event_t* e) {
-        auto* self = static_cast<WhiteboardView*>(lv_event_get_user_data(e));
-        self->topBarHide();
+    lv_obj_add_event_cb(_close_btn, [](lv_event_t*) {
+        // x = 退出程序（eMP-gba 的红 x 同义：关闭当前界面/应用）
+        std::fprintf(stderr, "[sketch] exit by top-bar x\n");
+        std::fflush(stderr);
+        std::exit(EXIT_SUCCESS);
     }, LV_EVENT_CLICKED, this);
 
     // 启动：展开动画进入（eMP-gba 同款 expand）
@@ -214,24 +216,36 @@ void WhiteboardView::pollInput()
         }
     }
 
-    // 顶缘手势：隐藏状态下点按/下滑顶部 16px 区展开（画图模式不抢占）
+    // ---- 锁定模式：整屏滑动手势（与 eMP-gba swipe 语义一致）----
+    // 上滑 → 顶栏收回动画；下滑 → 顶栏展开动画。顶栏可见时从其区域内按下的
+    // 触点不启动手势（留给按钮）；手势每次按下只触发一次。
     if (!_draw_mode) {
-        if (pressed && !_bar_visible && pt.y >= 0 && pt.y <= 16) {
-            _edge_armed = true;
+        if (pressed && !_gesturing) {
+            if (!(_bar_visible && pt.y >= 0 && pt.y <= kBarH)) {
+                _gesturing = true;
+                _gest_done = false;
+                _gest_start = pt;
+            }
+        } else if (!pressed) {
+            _gesturing = false;
         }
-        if (!pressed && _edge_armed) {
-            _edge_armed = false;
-            topBarShow();
+        if (_gesturing && pressed && !_gest_done) {
+            const int32_t dy = pt.y - _gest_start.y;
+            const int32_t dx = std::abs(pt.x - _gest_start.x);
+            if (std::abs(dy) > 28 && std::abs(dy) >= dx * 3 / 2) {
+                _gest_done = true;
+                if (dy > 0) {
+                    topBarShow();
+                } else {
+                    topBarHide();
+                }
+                return;
+            }
         }
-    }
-    if (pressed && _bar_visible && pt.y <= kBarH && !_edge_armed && !_bar_visible) {
-        /* bar 空白区不处理（按钮各自响应） */
+        return;   // 锁定模式触摸不落笔
     }
 
-    if (!_draw_mode) {
-        return;
-    }
-
+    // ---- 绘图模式：触摸画线 ----
     if (pressed && pt.y <= kBarH) {
         _touching = false;   // 顶栏区域：交给按钮
         _last_valid = false;

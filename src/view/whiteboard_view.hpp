@@ -42,7 +42,7 @@ private:
     void topBarShow();
     void topBarHide();
     void updateModeButton();
-    void pollInput();            // 触摸：绘图模式画线 / 顶缘手势展开
+    void pollInput();            // 触摸：锁定模式整屏手势(上滑收回/下滑展开)；绘图模式画线
     void doScreenshot();         // 保存当前屏（/dev/fb0 首帧）为 BMP
 
     lv_obj_t* _canvas       = nullptr;
@@ -58,7 +58,10 @@ private:
 
     bool _bar_visible = false;
     bool _draw_mode   = false;
-    bool _edge_armed   = false;   // 手势：触点起始于顶缘
+    // 整屏手势（锁定模式）
+    bool _gesturing   = false;
+    bool _gest_done   = false;
+    lv_point_t _gest_start{0, 0};
     // 触摸绘制状态
     uint32_t _touch_id = 5000000; // 板端绘制对象 id 基数（避开浏览器侧小 id）
     bool _touching = false;
